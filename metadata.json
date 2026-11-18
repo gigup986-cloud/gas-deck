@@ -1,0 +1,6 @@
+{
+  "name": "Gas Deck - Video Analysis & Specification Portal",
+  "description": "Comprehensive product requirements document, video analysis, and architectural handoff specification for the Gas Deck on-demand gas marketplace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
