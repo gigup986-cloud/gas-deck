@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Flame,
   MapPin,
@@ -10,10 +10,14 @@ import {
   ChevronRight,
   Info,
   Clock,
-  AlertCircle
+  AlertCircle,
+  ExternalLink,
 } from 'lucide-react';
 import { useGasDeck } from '../../context/GasDeckContext';
+import { authService } from '../../services/authService';
 import { PaymentMethod } from '../../types';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 export const CheckoutModal: React.FC = () => {
   const {
@@ -27,17 +31,174 @@ export const CheckoutModal: React.FC = () => {
     activeAddress,
     setIsLocationModalOpen,
     createOrder,
+    user,
+    setIsAuthModalOpen,
+    setAuthModalMode,
+    showToast,
   } = useGasDeck();
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('ONLINE_CARD');
   const [deliveryInstructions, setDeliveryInstructions] = useState('Please perform soapy water leak test before cylinder handover.');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [backendOrderId, setBackendOrderId] = useState<string | null>(null);
+  const [paymentAuthUrl, setPaymentAuthUrl] = useState<string | null>(null);
 
   if (!isCheckoutModalOpen) return null;
 
-  const handlePlaceOrder = () => {
+  useEffect(() => {
+    if (paymentAuthUrl) {
+      window.open(paymentAuthUrl, '_blank');
+    }
+  }, [paymentAuthUrl]);
+
+  const placeOrderViaBackend = async (): Promise<{ success: boolean; orderId?: string; error?: string }> => {
+    if (!user) return { success: false, error: 'Not authenticated' };
+
+    try {
+      // Ensure delivery address exists in backend
+      let addressId = activeAddress.id;
+      if (!addressId.startsWith('addr-')) {
+        // Already a backend address ID
+        addressId = activeAddress.id;
+      } else {
+        // Try to sync the address to backend
+        try {
+          const addrResp = await fetch(`${API_URL}/api/addresses`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${(await authService.getSession())?.access_token ?? ''}`,
+            },
+            body: JSON.stringify({
+              label: activeAddress.label,
+              streetAddress: activeAddress.streetAddress,
+              area: activeAddress.area,
+              state: activeAddress.state,
+              landmark: activeAddress.landmark,
+              deliveryNotes: activeAddress.deliveryNotes,
+              latitude: activeAddress.latitude,
+              longitude: activeAddress.longitude,
+              isDefault: activeAddress.isDefault,
+            }),
+          });
+          if (addrResp.ok) {
+            const addrData = await addrResp.json();
+            addressId = addrData.id;
+          }
+        } catch {
+          // Address sync failed; will fall back to mock
+        }
+      }
+
+      const orderResp = await fetch(`${API_URL}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${(await authService.getSession())?.access_token ?? ''}`,
+        },
+        body: JSON.stringify({
+          vendorId: selectedVendor?.id || 'ven-son-and-father',
+          orderType: refillWeightKg ? 'BY_WEIGHT' : 'BY_BUDGET',
+          cylinderSizeKg: refillWeightKg || undefined,
+          budgetNaira: refillWeightKg ? undefined : Math.round(calculatedGasPrice / 1480) * 1480,
+          deliveryAddressId: addressId,
+          deliveryInstructions,
+          paymentMethod,
+        }),
+      });
+
+      if (!orderResp.ok) {
+        const errorBody = await orderResp.json().catch(() => ({}));
+        return { success: false, error: errorBody.message || 'Order creation failed' };
+      }
+
+      const orderData = await orderResp.json();
+      setBackendOrderId(orderData.order.id);
+
+      if (paymentMethod === 'ONLINE_CARD') {
+        const payResp = await fetch(`${API_URL}/api/payments/initialize`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${(await authService.getSession())?.access_token ?? ''}`,
+          },
+          body: JSON.stringify({
+            reference: orderData.order.orderCode,
+          }),
+        });
+
+        if (payResp.ok) {
+          const payData = await payResp.json();
+          setPaymentAuthUrl(payData.authorizationUrl);
+        }
+      }
+
+      return { success: true, orderId: orderData.order.id };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Order creation failed' };
+    }
+  };
+
+  const handlePlaceOrder = async () => {
+    if (!user) {
+      setIsCheckoutModalOpen(false);
+      setAuthModalMode('REGISTER');
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     setIsSubmitting(true);
-    setTimeout(() => {
+
+    try {
+      const result = await placeOrderViaBackend();
+      if (result.success) {
+        // Also update local context for UI consistency
+        createOrder({
+          vendor: selectedVendor || {
+            id: 'ven-son-and-father',
+            name: 'Son And Father Oil & Gas',
+            distanceKm: 1.4,
+            deliveryFee: 1500,
+            pricePerKg: 1480,
+            deliveryTimeMin: '15 - 25 min',
+          } as any,
+          weightKg: refillWeightKg,
+          gasAmount: calculatedGasPrice,
+          deliveryFee: calculatedDeliveryFee,
+          paymentMethod: paymentMethod,
+          deliveryAddress: activeAddress,
+          deliveryInstructions: deliveryInstructions,
+        });
+        setIsCheckoutModalOpen(false);
+        if (paymentMethod === 'ONLINE_CARD' && paymentAuthUrl) {
+          // Paystack URL opened via useEffect
+          showToast('Order created. Completing payment via Paystack...');
+        } else {
+          showToast('Order placed successfully!');
+        }
+      } else {
+        // Fall back to mock order creation
+        createOrder({
+          vendor: selectedVendor || {
+            id: 'ven-son-and-father',
+            name: 'Son And Father Oil & Gas',
+            distanceKm: 1.4,
+            deliveryFee: 1500,
+            pricePerKg: 1480,
+            deliveryTimeMin: '15 - 25 min',
+          } as any,
+          weightKg: refillWeightKg,
+          gasAmount: calculatedGasPrice,
+          deliveryFee: calculatedDeliveryFee,
+          paymentMethod: paymentMethod,
+          deliveryAddress: activeAddress,
+          deliveryInstructions: deliveryInstructions,
+        });
+        setIsCheckoutModalOpen(false);
+        showToast(`Order placed (sandbox mode). ${result.error}`);
+      }
+    } catch {
+      // Final fallback: mock order
       createOrder({
         vendor: selectedVendor || {
           id: 'ven-son-and-father',
@@ -54,13 +215,15 @@ export const CheckoutModal: React.FC = () => {
         deliveryAddress: activeAddress,
         deliveryInstructions: deliveryInstructions,
       });
-      setIsSubmitting(false);
       setIsCheckoutModalOpen(false);
-    }, 800);
+      showToast('Order placed (sandbox mode).');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto max-h-[calc(100vh-2rem)]">
       <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden relative animate-in fade-in zoom-in-95 duration-200 my-8">
         {/* Header */}
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
@@ -238,6 +401,15 @@ export const CheckoutModal: React.FC = () => {
               Phase 1 Sandbox mode: No real debit card will be charged. Clicking submit confirms your simulated order to Son And Father Oil &amp; Gas.
             </span>
           </div>
+
+          {!user && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 space-y-1">
+              <span className="text-xs font-bold text-amber-800 block">Registration Required</span>
+              <span className="text-[10px] text-amber-700 block">
+                Create an account or sign in to place your order. Your vendor, quantity, and delivery address will be saved.
+              </span>
+            </div>
+          )}
 
           {/* Submit Action */}
           <button
